@@ -190,7 +190,7 @@ struct VoeWebSheet: View {
     @State private var webView = WKWebView()
     @State private var extractError = ""
 
-    private let extractScript = """
+    private let extractScript = #"""
     (() => {
       function collectDocs(win) {
         const docs = [];
@@ -207,7 +207,7 @@ struct VoeWebSheet: View {
       }
 
       function parseRgb(str) {
-        const m = (str || "").match(/rgba?\\(\\s*(\\d+)\\s*,\\s*(\\d+)\\s*,\\s*(\\d+)(?:\\s*,\\s*([\\d.]+))?/i);
+        const m = (str || "").match(/rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)(?:\s*,\s*([\d.]+))?/i);
         if (!m) return null;
         return {
           r: parseInt(m[1], 10),
@@ -226,22 +226,18 @@ struct VoeWebSheet: View {
         const rgb = parseRgb(bg);
         if (!rgb || rgb.a <= 0.05) return null;
 
-        // Игнорируем белый, прозрачный и светло-серый фон
         const maxC = Math.max(rgb.r, rgb.g, rgb.b);
         const minC = Math.min(rgb.r, rgb.g, rgb.b);
         const saturation = maxC - minC;
         if (maxC > 220 && saturation < 25) return null;
         if (saturation < 20 && maxC > 160) return null;
 
-        // Оранжевый / красный
         if (rgb.r > 190 && rgb.g >= 45 && rgb.g <= 145 && rgb.b < 80) {
           return "Застосовано";
         }
-        // Жёлтый / янтарный
         if (rgb.r > 190 && rgb.g > 135 && rgb.b < 145) {
           return "Заплановано";
         }
-        // Любой другой выраженный цветной квадратик/полоска
         if (saturation >= 25) {
           return "Відключення";
         }
@@ -250,43 +246,49 @@ struct VoeWebSheet: View {
 
       function classifyIndicator(indicatorCell) {
         if (!indicatorCell) return null;
-        // Сначала проверяем внутренние элементы (сами квадратики/полоски)
         const inner = Array.from(indicatorCell.querySelectorAll("*"));
         for (const el of inner) {
           const st = classifyBox(el);
           if (st) return st;
         }
-        // Если квадратик — это сама ячейка indicatorCell
         return classifyBox(indicatorCell);
+      }
+
+      function normalizeSlot(raw) {
+        const clean = (raw || "").replace(/\s+/g, "");
+        const m = clean.match(/^(\d{1,2})[-–—](\d{1,2})$/);
+        if (!m) return null;
+        const h1 = parseInt(m[1], 10);
+        const h2 = parseInt(m[2], 10);
+        if (h1 < 0 || h1 > 23 || h2 < 1 || h2 > 24) return null;
+        return `${String(h1).padStart(2, "0")}-${String(h2).padStart(2, "0")}`;
       }
 
       const docs = collectDocs(window);
       let fullText = "";
       const slotMap = new Map();
-      const slotRegex = /^(\\d{1,2})\\s*[-–—]\\s*(\\d{1,2})$/;
 
       for (const doc of docs) {
         if (!doc || !doc.body) continue;
-        fullText += "\\n" + (doc.body.innerText || "");
+        fullText += "\n" + (doc.body.innerText || "");
 
         const trs = Array.from(doc.querySelectorAll("tr"));
         for (const tr of trs) {
-          const cells = Array.from(tr.children);
+          const cells = Array.from(tr.querySelectorAll("th, td"));
           if (cells.length < 2) continue;
 
-          const firstText = (cells[0].innerText || "").trim();
-          const m = firstText.match(slotRegex);
-          if (!m) continue;
+          const firstSlot = normalizeSlot(cells[0].innerText);
+          if (!firstSlot) continue;
 
-          const h1 = m[1].padStart(2, "0");
-          const h2 = m[2].padStart(2, "0");
-          const hourLabel = `${h1}-${h2}`;
+          let statusLabel = null;
+          for (let i = 1; i < cells.length; i++) {
+            statusLabel = classifyIndicator(cells[i]);
+            if (statusLabel) break;
+          }
 
-          const statusLabel = classifyIndicator(cells[1]);
           const isDisc = statusLabel !== null;
-
-          slotMap.set(hourLabel, {
-            hour: hourLabel,
+          slotMap.set(firstSlot, {
+            hour: firstSlot,
             class: isDisc ? "has_disconnection" : "no_disconnection",
             segments: isDisc ? [{ label: statusLabel }] : []
           });
@@ -299,7 +301,7 @@ struct VoeWebSheet: View {
       }
 
       const queueMatch = fullText.match(/Черга[^0-9]*([0-9]+(?:[.,][0-9]+)?)/i);
-      const dateMatch = fullText.match(/(\\d{2}\\.\\d{2}\\.\\d{4}|\\d{1,2}\\.\\d{1,2})/);
+      const dateMatch = fullText.match(/(\d{2}\.\d{2}\.\d{4}|\d{1,2}\.\d{1,2})/);
       const dayLabel = dateMatch ? dateMatch[1] : "Сьогодні";
 
       return JSON.stringify({
@@ -313,7 +315,7 @@ struct VoeWebSheet: View {
         }]
       });
     })();
-    """
+    """#
 
     var body: some View {
         NavigationStack {
