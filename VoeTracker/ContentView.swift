@@ -206,89 +206,97 @@ struct VoeWebSheet: View {
         return docs;
       }
 
+      function parseRgb(str) {
+        const m = (str || "").match(/rgba?\\(\\s*(\\d+)\\s*,\\s*(\\d+)\\s*,\\s*(\\d+)(?:\\s*,\\s*([\\d.]+))?/i);
+        if (!m) return null;
+        return {
+          r: parseInt(m[1], 10),
+          g: parseInt(m[2], 10),
+          b: parseInt(m[3], 10),
+          a: m[4] !== undefined ? parseFloat(m[4]) : 1
+        };
+      }
+
+      function classifyBox(el) {
+        if (!el) return null;
+        const rect = el.getBoundingClientRect();
+        if (rect.width < 8 || rect.height < 6) return null;
+
+        const bg = getComputedStyle(el).backgroundColor || "";
+        const rgb = parseRgb(bg);
+        if (!rgb || rgb.a <= 0.05) return null;
+
+        // Игнорируем белый, прозрачный и светло-серый фон
+        const maxC = Math.max(rgb.r, rgb.g, rgb.b);
+        const minC = Math.min(rgb.r, rgb.g, rgb.b);
+        const saturation = maxC - minC;
+        if (maxC > 220 && saturation < 25) return null;
+        if (saturation < 20 && maxC > 160) return null;
+
+        // Оранжевый / красный
+        if (rgb.r > 190 && rgb.g >= 45 && rgb.g <= 145 && rgb.b < 80) {
+          return "Застосовано";
+        }
+        // Жёлтый / янтарный
+        if (rgb.r > 190 && rgb.g > 135 && rgb.b < 145) {
+          return "Заплановано";
+        }
+        // Любой другой выраженный цветной квадратик/полоска
+        if (saturation >= 25) {
+          return "Відключення";
+        }
+        return null;
+      }
+
+      function classifyIndicator(indicatorCell) {
+        if (!indicatorCell) return null;
+        // Сначала проверяем внутренние элементы (сами квадратики/полоски)
+        const inner = Array.from(indicatorCell.querySelectorAll("*"));
+        for (const el of inner) {
+          const st = classifyBox(el);
+          if (st) return st;
+        }
+        // Если квадратик — это сама ячейка indicatorCell
+        return classifyBox(indicatorCell);
+      }
+
       const docs = collectDocs(window);
       let fullText = "";
-      const slots = [];
+      const slotMap = new Map();
       const slotRegex = /^(\\d{1,2})\\s*[-–—]\\s*(\\d{1,2})$/;
 
       for (const doc of docs) {
         if (!doc || !doc.body) continue;
         fullText += "\\n" + (doc.body.innerText || "");
 
-        const candidates = Array.from(doc.querySelectorAll("div, span, td, th, li, p, button, a"));
-        for (const el of candidates) {
-          const ownText = Array.from(el.childNodes)
-            .filter(n => n.nodeType === Node.TEXT_NODE)
-            .map(n => n.textContent.trim())
-            .join(" ")
-            .trim();
+        const trs = Array.from(doc.querySelectorAll("tr"));
+        for (const tr of trs) {
+          const cells = Array.from(tr.children);
+          if (cells.length < 2) continue;
 
-          const textToMatch = ownText || (el.children.length === 0 ? (el.innerText || "").trim() : "");
-          const m = textToMatch.match(slotRegex);
+          const firstText = (cells[0].innerText || "").trim();
+          const m = firstText.match(slotRegex);
           if (!m) continue;
 
           const h1 = m[1].padStart(2, "0");
           const h2 = m[2].padStart(2, "0");
           const hourLabel = `${h1}-${h2}`;
-          if (slots.some(s => s.hour === hourLabel)) continue;
 
-          const rowEl = el.closest("tr, [class*='row'], [class*='item'], [class*='hour'], [class*='slot']") || el.parentElement;
-          const rowText = (rowEl ? rowEl.innerText : "") || "";
-          const rowHtml = (rowEl ? rowEl.outerHTML : "") || "";
+          const statusLabel = classifyIndicator(cells[1]);
+          const isDisc = statusLabel !== null;
 
-          let statusLabel = "";
-          let isDisc = false;
-
-          const checkTargets = [el, ...Array.from(el.parentElement ? el.parentElement.children : [])];
-          for (const t of checkTargets) {
-            const cls = (t.className || "").toString().toLowerCase();
-            const styleAttr = (t.getAttribute("style") || "").toLowerCase();
-            const bg = getComputedStyle(t).backgroundColor || "";
-            const rgbMatch = bg.match(/rgba?\\((\\d+),\\s*(\\d+),\\s*(\\d+)/i);
-            let isWarmColor = false;
-            if (rgbMatch) {
-              const r = parseInt(rgbMatch[1], 10);
-              const g = parseInt(rgbMatch[2], 10);
-              const b = parseInt(rgbMatch[3], 10);
-              // Жёлтые / оранжевые / красные оттенки отключения
-              if (r > 180 && g > 70 && b < 140 && !(r > 235 && g > 235 && b > 235)) {
-                isWarmColor = true;
-              }
-            }
-            if (
-              cls.includes("disconn") || cls.includes("outage") || cls.includes("plan") ||
-              cls.includes("fact") || cls.includes("warn") || cls.includes("danger") ||
-              styleAttr.includes("orange") || styleAttr.includes("yellow") || styleAttr.includes("red") ||
-              isWarmColor
-            ) {
-              isDisc = true;
-              break;
-            }
-          }
-
-          if (/застосовано|аварійн|відключ/i.test(rowText) || /applied|fact|red/i.test(rowHtml)) {
-            statusLabel = "Застосовано";
-            isDisc = true;
-          } else if (/заплановано|план/i.test(rowText) || /plan|yellow|amber/i.test(rowHtml)) {
-            statusLabel = "Заплановано";
-            isDisc = true;
-          } else if (isDisc) {
-            statusLabel = "Відключення";
-          }
-
-          slots.push({
+          slotMap.set(hourLabel, {
             hour: hourLabel,
             class: isDisc ? "has_disconnection" : "no_disconnection",
-            segments: isDisc ? [{ label: statusLabel || "Відключення" }] : []
+            segments: isDisc ? [{ label: statusLabel }] : []
           });
         }
       }
 
+      const slots = Array.from(slotMap.values()).sort((a, b) => parseInt(a.hour, 10) - parseInt(b.hour, 10));
       if (slots.length === 0) {
-        return JSON.stringify({ error: "Не удалось распознать слоты часов на странице" });
+        return JSON.stringify({ error: "Не удалось распознать слоты часов в таблице" });
       }
-
-      slots.sort((a, b) => parseInt(a.hour, 10) - parseInt(b.hour, 10));
 
       const queueMatch = fullText.match(/Черга[^0-9]*([0-9]+(?:[.,][0-9]+)?)/i);
       const dateMatch = fullText.match(/(\\d{2}\\.\\d{2}\\.\\d{4}|\\d{1,2}\\.\\d{1,2})/);
@@ -297,7 +305,7 @@ struct VoeWebSheet: View {
       return JSON.stringify({
         tables: [{
           listnum: queueMatch ? queueMatch[1] : "—",
-          reserve: false,
+          reserve: /резервн/i.test(fullText),
           rows: [{
             label: dayLabel,
             cells: slots
