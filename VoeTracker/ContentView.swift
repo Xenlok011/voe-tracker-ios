@@ -1,5 +1,6 @@
 import SwiftUI
 import UserNotifications
+import WebKit
 import UIKit
 
 struct HourSlot: Identifiable, Codable, Equatable {
@@ -182,9 +183,113 @@ enum NotificationManager {
     }
 }
 
-struct ContentView: View {
-    @Binding var externalJSON: String?
+struct VoeWebSheet: View {
+    let url: URL
+    let onExtractedJSON: (String) -> Void
+    @Environment(\.dismiss) private var dismiss
+    @State private var webView = WKWebView()
+    @State private var extractError = ""
 
+    private let extractScript = """
+    (() => {
+      const table = document.querySelector("table");
+      if (!table) {
+        return JSON.stringify({ error: "Таблица графика не найдена на странице" });
+      }
+      const trs = Array.from(table.querySelectorAll("tr"));
+      if (trs.length < 2) {
+        return JSON.stringify({ error: "В таблице недостаточно строк" });
+      }
+      const headerCells = Array.from(trs[0].querySelectorAll("th, td")).slice(1);
+      const hours = headerCells.map(c => c.innerText.trim());
+
+      const rows = trs.slice(1).map(tr => {
+        const tds = Array.from(tr.querySelectorAll("th, td"));
+        const label = (tds[0]?.innerText || "").trim();
+        const cells = tds.slice(1).map((td, idx) => {
+          const cls = td.className || "";
+          const txt = td.innerText.trim();
+          const hasDisc = cls.includes("has_disconnection") || (txt !== "" && !cls.includes("no_disconnection"));
+          return {
+            hour: hours[idx] || `${idx}-${idx + 1}`,
+            class: hasDisc ? "has_disconnection" : "no_disconnection",
+            segments: txt ? [{ label: txt }] : []
+          };
+        });
+        return { label, cells };
+      }).filter(r => r.label && r.cells.length > 0);
+
+      const queueMatch = document.body.innerText.match(/Черга[:\\s]*([0-9.]+)/i);
+      return JSON.stringify({
+        tables: [{
+          listnum: queueMatch ? queueMatch[1] : "—",
+          reserve: false,
+          rows: rows
+        }]
+      });
+    })();
+    """
+
+    var body: some View {
+        NavigationStack {
+            VStack(spacing: 0) {
+                if !extractError.isEmpty {
+                    Text(extractError)
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(8)
+                        .background(Color.orange.opacity(0.12))
+                }
+                WebViewContainer(webView: webView, url: url)
+            }
+            .navigationTitle("Сайт ВОЕ")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button("Закрыть") { dismiss() }
+                }
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Забрать график") {
+                        webView.evaluateJavaScript(extractScript) { result, error in
+                            if let error = error {
+                                extractError = "Ошибка скрипта: \(error.localizedDescription)"
+                                return
+                            }
+                            guard let jsonStr = result as? String else {
+                                extractError = "Не удалось получить данные со страницы"
+                                return
+                            }
+                            if let data = jsonStr.data(using: .utf8),
+                               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                               let errMsg = obj["error"] as? String {
+                                extractError = errMsg
+                                return
+                            }
+                            onExtractedJSON(jsonStr)
+                            dismiss()
+                        }
+                    }
+                    .bold()
+                }
+            }
+        }
+    }
+}
+
+private struct WebViewContainer: UIViewRepresentable {
+    let webView: WKWebView
+    let url: URL
+
+    func makeUIView(context: Context) -> WKWebView {
+        webView.load(URLRequest(url: url))
+        return webView
+    }
+
+    func updateUIView(_ uiView: WKWebView, context: Context) {}
+}
+
+struct ContentView: View {
     @AppStorage("voe_city") private var city = "м.Вінниця (Вінницька Область/М.Вінниця)"
     @AppStorage("voe_street") private var street = "вулиця Генерала Григоренка"
     @AppStorage("voe_house") private var house = "69"
@@ -195,6 +300,7 @@ struct ContentView: View {
     @State private var payload: SchedulePayload?
     @State private var changedBanner = false
     @State private var showJsonSheet = false
+    @State private var showWebSheet = false
     @State private var rawJsonInput = ""
     @State private var statusText = ""
 
@@ -284,7 +390,7 @@ struct ContentView: View {
                             }
                         }
                     } else {
-                        Text("Нет данных графика. Нажмите «Вставить JSON» или запустите Быструю команду.")
+                        Text("Нет данных графика. Нажмите «Обновить» или «Вставить JSON».")
                             .font(.subheadline)
                             .foregroundStyle(.secondary)
                             .frame(maxWidth: .infinity)
@@ -297,11 +403,21 @@ struct ContentView: View {
             }
             .navigationTitle("ВОЕ Трекер")
             .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button("Обновить") {
+                        showWebSheet = true
+                    }
+                }
                 ToolbarItem(placement: .topBarTrailing) {
-                    Button("Вставить JSON") {
+                    Button("JSON") {
                         rawJsonInput = UIPasteboard.general.string ?? ""
                         showJsonSheet = true
                     }
+                }
+            }
+            .sheet(isPresented: $showWebSheet) {
+                VoeWebSheet(url: URL(string: "https://disconnection.voe.com.ua/")!) { extractedJson in
+                    applyRawJson(extractedJson)
                 }
             }
             .sheet(isPresented: $showJsonSheet) {
@@ -329,11 +445,6 @@ struct ContentView: View {
             .onAppear {
                 NotificationManager.requestPermission()
                 loadCached()
-            }
-            .onChange(of: externalJSON) { _, newValue in
-                guard let json = newValue, !json.isEmpty else { return }
-                applyRawJson(json)
-                externalJSON = nil
             }
         }
     }
