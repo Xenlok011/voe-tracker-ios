@@ -183,6 +183,8 @@ enum NotificationManager {
 }
 
 struct ContentView: View {
+    @Binding var externalJSON: String?
+
     @AppStorage("voe_city") private var city = "м.Вінниця (Вінницька Область/М.Вінниця)"
     @AppStorage("voe_street") private var street = "вулиця Генерала Григоренка"
     @AppStorage("voe_house") private var house = "69"
@@ -282,7 +284,7 @@ struct ContentView: View {
                             }
                         }
                     } else {
-                        Text("Нет данных графика. Нажмите «Вставить JSON» для загрузки ответа search.php.")
+                        Text("Нет данных графика. Нажмите «Вставить JSON» или запустите Быструю команду.")
                             .font(.subheadline)
                             .foregroundStyle(.secondary)
                             .frame(maxWidth: .infinity)
@@ -327,6 +329,11 @@ struct ContentView: View {
             .onAppear {
                 NotificationManager.requestPermission()
                 loadCached()
+            }
+            .onChange(of: externalJSON) { _, newValue in
+                guard let json = newValue, !json.isEmpty else { return }
+                applyRawJson(json)
+                externalJSON = nil
             }
         }
     }
