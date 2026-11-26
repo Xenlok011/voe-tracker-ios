@@ -192,39 +192,116 @@ struct VoeWebSheet: View {
 
     private let extractScript = """
     (() => {
-      const table = document.querySelector("table");
-      if (!table) {
-        return JSON.stringify({ error: "Таблица графика не найдена на странице" });
+      function collectDocs(win) {
+        const docs = [];
+        try { docs.push(win.document); } catch (e) {}
+        try {
+          const frames = win.document.querySelectorAll("iframe");
+          for (const f of frames) {
+            try {
+              if (f.contentWindow) docs.push(...collectDocs(f.contentWindow));
+            } catch (e) {}
+          }
+        } catch (e) {}
+        return docs;
       }
-      const trs = Array.from(table.querySelectorAll("tr"));
-      if (trs.length < 2) {
-        return JSON.stringify({ error: "В таблице недостаточно строк" });
+
+      const docs = collectDocs(window);
+      let fullText = "";
+      const slots = [];
+      const slotRegex = /^(\\d{1,2})\\s*[-–—]\\s*(\\d{1,2})$/;
+
+      for (const doc of docs) {
+        if (!doc || !doc.body) continue;
+        fullText += "\\n" + (doc.body.innerText || "");
+
+        const candidates = Array.from(doc.querySelectorAll("div, span, td, th, li, p, button, a"));
+        for (const el of candidates) {
+          const ownText = Array.from(el.childNodes)
+            .filter(n => n.nodeType === Node.TEXT_NODE)
+            .map(n => n.textContent.trim())
+            .join(" ")
+            .trim();
+
+          const textToMatch = ownText || (el.children.length === 0 ? (el.innerText || "").trim() : "");
+          const m = textToMatch.match(slotRegex);
+          if (!m) continue;
+
+          const h1 = m[1].padStart(2, "0");
+          const h2 = m[2].padStart(2, "0");
+          const hourLabel = `${h1}-${h2}`;
+          if (slots.some(s => s.hour === hourLabel)) continue;
+
+          const rowEl = el.closest("tr, [class*='row'], [class*='item'], [class*='hour'], [class*='slot']") || el.parentElement;
+          const rowText = (rowEl ? rowEl.innerText : "") || "";
+          const rowHtml = (rowEl ? rowEl.outerHTML : "") || "";
+
+          let statusLabel = "";
+          let isDisc = false;
+
+          const checkTargets = [el, ...Array.from(el.parentElement ? el.parentElement.children : [])];
+          for (const t of checkTargets) {
+            const cls = (t.className || "").toString().toLowerCase();
+            const styleAttr = (t.getAttribute("style") || "").toLowerCase();
+            const bg = getComputedStyle(t).backgroundColor || "";
+            const rgbMatch = bg.match(/rgba?\\((\\d+),\\s*(\\d+),\\s*(\\d+)/i);
+            let isWarmColor = false;
+            if (rgbMatch) {
+              const r = parseInt(rgbMatch[1], 10);
+              const g = parseInt(rgbMatch[2], 10);
+              const b = parseInt(rgbMatch[3], 10);
+              // Жёлтые / оранжевые / красные оттенки отключения
+              if (r > 180 && g > 70 && b < 140 && !(r > 235 && g > 235 && b > 235)) {
+                isWarmColor = true;
+              }
+            }
+            if (
+              cls.includes("disconn") || cls.includes("outage") || cls.includes("plan") ||
+              cls.includes("fact") || cls.includes("warn") || cls.includes("danger") ||
+              styleAttr.includes("orange") || styleAttr.includes("yellow") || styleAttr.includes("red") ||
+              isWarmColor
+            ) {
+              isDisc = true;
+              break;
+            }
+          }
+
+          if (/застосовано|аварійн|відключ/i.test(rowText) || /applied|fact|red/i.test(rowHtml)) {
+            statusLabel = "Застосовано";
+            isDisc = true;
+          } else if (/заплановано|план/i.test(rowText) || /plan|yellow|amber/i.test(rowHtml)) {
+            statusLabel = "Заплановано";
+            isDisc = true;
+          } else if (isDisc) {
+            statusLabel = "Відключення";
+          }
+
+          slots.push({
+            hour: hourLabel,
+            class: isDisc ? "has_disconnection" : "no_disconnection",
+            segments: isDisc ? [{ label: statusLabel || "Відключення" }] : []
+          });
+        }
       }
-      const headerCells = Array.from(trs[0].querySelectorAll("th, td")).slice(1);
-      const hours = headerCells.map(c => c.innerText.trim());
 
-      const rows = trs.slice(1).map(tr => {
-        const tds = Array.from(tr.querySelectorAll("th, td"));
-        const label = (tds[0]?.innerText || "").trim();
-        const cells = tds.slice(1).map((td, idx) => {
-          const cls = td.className || "";
-          const txt = td.innerText.trim();
-          const hasDisc = cls.includes("has_disconnection") || (txt !== "" && !cls.includes("no_disconnection"));
-          return {
-            hour: hours[idx] || `${idx}-${idx + 1}`,
-            class: hasDisc ? "has_disconnection" : "no_disconnection",
-            segments: txt ? [{ label: txt }] : []
-          };
-        });
-        return { label, cells };
-      }).filter(r => r.label && r.cells.length > 0);
+      if (slots.length === 0) {
+        return JSON.stringify({ error: "Не удалось распознать слоты часов на странице" });
+      }
 
-      const queueMatch = document.body.innerText.match(/Черга[:\\s]*([0-9.]+)/i);
+      slots.sort((a, b) => parseInt(a.hour, 10) - parseInt(b.hour, 10));
+
+      const queueMatch = fullText.match(/Черга[^0-9]*([0-9]+(?:[.,][0-9]+)?)/i);
+      const dateMatch = fullText.match(/(\\d{2}\\.\\d{2}\\.\\d{4}|\\d{1,2}\\.\\d{1,2})/);
+      const dayLabel = dateMatch ? dateMatch[1] : "Сьогодні";
+
       return JSON.stringify({
         tables: [{
           listnum: queueMatch ? queueMatch[1] : "—",
           reserve: false,
-          rows: rows
+          rows: [{
+            label: dayLabel,
+            cells: slots
+          }]
         }]
       });
     })();
