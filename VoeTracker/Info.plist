@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
     <key>CFBundleDisplayName</key>
-    <string>ВОЕ Трекер</string>
+    <string>VoeTracker</string>
     <key>CFBundleIdentifier</key>
     <string>com.example.voetracker</string>
     <key>CFBundleName</key>
